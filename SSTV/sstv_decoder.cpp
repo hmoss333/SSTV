@@ -14,7 +14,7 @@ Image SSTVDecoder::decode(const Audio& audio) {
 
 SSTVMode SSTVDecoder::detectMode(const Audio& audio) {
     // TODO: Implement VIS detection
-    return SSTVMode::SSTV_MODE_MARTIN_M1;
+    return SSTV_MODE_MARTIN_M1; //SSTVMode::SSTV_MODE_MARTIN_M1;
 }
 
 void SSTVDecoder::decodeLines(const Audio& audio, Image& image) {

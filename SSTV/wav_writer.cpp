@@ -54,7 +54,6 @@ bool WavWriter::writeToFile(const std::string& path, const Audio& audio) {
 }
 
 // ===== Helpers (little-endian write) =====
-
 void WavWriter::writeInt16(std::ofstream& file, int16_t value) {
     file.put(value & 0xFF);
     file.put((value >> 8) & 0xFF);
