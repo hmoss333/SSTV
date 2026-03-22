@@ -2,6 +2,7 @@
 
 Image SSTVDecoder::decode(const Audio& audio) {
     SSTVMode mode = detectMode(audio);
+    //SSTVMode mode = SSTV_MODE_MARTIN_M1;
 
     // Placeholder resolution (depends on mode)
     Image image(320, 256);
@@ -13,7 +14,7 @@ Image SSTVDecoder::decode(const Audio& audio) {
 
 SSTVMode SSTVDecoder::detectMode(const Audio& audio) {
     // TODO: Implement VIS detection
-    return SSTVMode::MartinM1;
+    return SSTVMode::SSTV_MODE_MARTIN_M1;
 }
 
 void SSTVDecoder::decodeLines(const Audio& audio, Image& image) {

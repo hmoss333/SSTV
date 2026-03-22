@@ -1,16 +1,11 @@
 ﻿#pragma once
 #include <vector>
-
-enum class SSTVMode {
-    MartinM1 = 0,
-    ScottieS1 = 1,
-    PD90 = 2
-};
+#include "sstv_mode.h"
 
 struct Image {
     int width;
     int height;
-    std::vector<uint8_t> data; // RGB (w * h * 3)
+    std::vector<uint8_t> data;
 
     Image(int w, int h)
         : width(w), height(h), data(w * h * 3) {}

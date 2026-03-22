@@ -1,6 +1,9 @@
 ﻿#include "sstv_bridge.h"
 #include "sstv_encoder.h"
 #include "sstv_decoder.h"
+#include "sstv_types.h"
+
+SSTVMode mode = SSTV_MODE_MARTIN_M1;
 
 SSTVAudio* sstv_encode(SSTVImage* image, SSTVMode mode) {
     // Convert C struct → C++ object
@@ -12,7 +15,7 @@ SSTVAudio* sstv_encode(SSTVImage* image, SSTVMode mode) {
     );
 
     SSTVEncoder encoder;
-    Audio audio = encoder.encode(img, static_cast<::SSTVMode>(mode));
+    Audio audio = encoder.encode(img, SSTVMode(mode));
 
     // Allocate output
     SSTVAudio* out = new SSTVAudio;
