@@ -29,22 +29,53 @@ recording from a real radio can be decoded by this app.
 
 ## Build & run
 
-Requires a JDK (17+ recommended; developed against 21). No `javac` was
-available in the sandbox this was built in, so this was compiled and
-validated using `java`'s single-file source-launcher on an equivalent
-combined file — the full multi-file project itself has **not** been
-compiled with `javac` yet. It should build cleanly (nothing was changed
-between the tested logic and this file layout beyond splitting it into
-packages/files), but if you hit anything, paste me the compiler error and
-I'll fix it immediately.
+Requires a JDK (17+ recommended; developed against 21) — the full JDK, not
+just a JRE, since a compiler is needed. No `javac` was available in the
+sandbox this was built in (JRE-only, network disabled), so the encoder/
+decoder logic was compiled and validated using `java`'s single-file
+source-launcher on an equivalent combined file, including a full write-WAV
+→ read-WAV → decode round trip. The final multi-file project itself has
+**not** been run through `javac` yet — if you hit a compile error, paste it
+to me and I'll fix it immediately.
+
+### Quickest: build a runnable JAR
 
 ```bash
-# from the project root (the folder containing src/)
+# macOS/Linux
+./build.sh
+java -jar sstv.jar
+
+# Windows
+build.bat
+java -jar sstv.jar
+```
+
+### Real executable: a standalone native app
+
+This runs the same build, then uses `jpackage` (bundled with any JDK 16+)
+to produce a genuine double-clickable app with its own bundled Java runtime
+— nobody running it needs Java installed at all:
+
+```bash
+# macOS/Linux -> dist/SSTV.app (macOS) or dist/SSTV/bin/SSTV (Linux)
+./build.sh package
+
+# Windows -> dist\SSTV\SSTV.exe
+build.bat package
+```
+
+Both scripts check for `javac`/`jpackage` on your `PATH` and give a clear
+error if either is missing.
+
+### Manual / IDE
+
+```bash
 javac -d out $(find src -name "*.java")
 java -cp out com.sstv.Main
 ```
 
-Or with an IDE: import `src` as the source root and run `com.sstv.Main`.
+Or import `src` as the source root in an IDE and run `com.sstv.Main`.
+
 
 ## Verified accuracy
 
