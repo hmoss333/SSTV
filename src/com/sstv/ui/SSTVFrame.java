@@ -1,8 +1,10 @@
 package com.sstv.ui;
 
-import com.sstv.codec.MartinM1;
+import com.sstv.codec.SSTVConstants;
 import com.sstv.codec.SSTVDecoder;
 import com.sstv.codec.SSTVEncoder;
+import com.sstv.codec.SSTVMode;
+import com.sstv.codec.SSTVModes;
 import com.sstv.codec.WavFile;
 
 import javax.imageio.ImageIO;
@@ -14,7 +16,7 @@ import java.io.File;
 public class SSTVFrame extends JFrame {
 
     public SSTVFrame() {
-        super("SSTV Encoder / Decoder — Martin M1");
+        super("SSTV Encoder / Decoder");
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setSize(920, 640);
         setLocationRelativeTo(null);
@@ -28,10 +30,11 @@ public class SSTVFrame extends JFrame {
     // ============================= ENCODE =============================
 
     private static class EncodePanel extends JPanel {
-        private final ImageView preview = new ImageView(MartinM1.WIDTH, MartinM1.HEIGHT);
+        private final ImageView preview = new ImageView();
         private final JLabel status = new JLabel("Choose an image to begin.");
         private final JButton chooseImageBtn = new JButton("Choose Image…");
         private final JButton encodeBtn = new JButton("Encode to WAV…");
+        private final JComboBox<SSTVMode> modeBox = new JComboBox<>(SSTVModes.ALL.toArray(new SSTVMode[0]));
         private final JProgressBar progress = new JProgressBar();
 
         private BufferedImage sourceImage;
@@ -44,6 +47,8 @@ public class SSTVFrame extends JFrame {
 
             JPanel top = new JPanel(new FlowLayout(FlowLayout.LEFT));
             top.add(chooseImageBtn);
+            top.add(new JLabel("Mode:"));
+            top.add(modeBox);
             top.add(encodeBtn);
             add(top, BorderLayout.NORTH);
 
@@ -54,9 +59,15 @@ public class SSTVFrame extends JFrame {
             add(bottom, BorderLayout.SOUTH);
 
             encodeBtn.setEnabled(false);
+            modeBox.setSelectedItem(SSTVModes.MARTIN_M1);
 
             chooseImageBtn.addActionListener(e -> chooseImage());
             encodeBtn.addActionListener(e -> encode());
+            modeBox.addActionListener(e -> updateStatusForSelection());
+        }
+
+        private SSTVMode selectedMode() {
+            return (SSTVMode) modeBox.getSelectedItem();
         }
 
         private void chooseImage() {
@@ -69,29 +80,39 @@ public class SSTVFrame extends JFrame {
                 BufferedImage img = ImageIO.read(fc.getSelectedFile());
                 if (img == null) throw new IllegalArgumentException("Unsupported or unreadable image file.");
                 sourceImage = img;
-                preview.setImage(img);
+                preview.setImage(img, selectedMode().width, selectedMode().height);
                 encodeBtn.setEnabled(true);
-                double seconds = 5.61 /*VIS+header approx*/ + MartinM1.HEIGHT * MartinM1.totalLineMs() / 1000.0;
-                status.setText(String.format(
-                        "Loaded %dx%d image. Will be scaled to %dx%d Martin M1 (~%.0f seconds of audio).",
-                        img.getWidth(), img.getHeight(), MartinM1.WIDTH, MartinM1.HEIGHT, seconds));
+                updateStatusForSelection();
             } catch (Exception ex) {
                 status.setText("Failed to load image: " + ex.getMessage());
             }
         }
 
+        private void updateStatusForSelection() {
+            SSTVMode mode = selectedMode();
+            preview.setAspect(mode.width, mode.height);
+            if (sourceImage == null) return;
+            double seconds = mode.rowDurationMs() * mode.height / 1000.0
+                    + mode.leadingSyncMs / 1000.0
+                    + 0.94; // approx VIS header duration
+            status.setText(String.format(
+                    "Loaded %dx%d image. Will be scaled to %dx%d for %s (~%.0f seconds of audio).",
+                    sourceImage.getWidth(), sourceImage.getHeight(), mode.width, mode.height, mode.name, seconds));
+        }
+
         private void encode() {
+            SSTVMode mode = selectedMode();
             JFileChooser fc = new JFileChooser();
             fc.setSelectedFile(new File("sstv_output.wav"));
             if (fc.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) return;
             File out = fc.getSelectedFile();
 
-            setBusy(true, "Encoding…");
+            setBusy(true, "Encoding as " + mode.name + "…");
             new SwingWorker<Void, Void>() {
                 @Override
                 protected Void doInBackground() throws Exception {
-                    double[] samples = SSTVEncoder.encode(sourceImage);
-                    WavFile.write(out, samples, MartinM1.SAMPLE_RATE);
+                    double[] samples = SSTVEncoder.encode(sourceImage, mode);
+                    WavFile.write(out, samples, SSTVConstants.SAMPLE_RATE);
                     return null;
                 }
 
@@ -100,7 +121,7 @@ public class SSTVFrame extends JFrame {
                     setBusy(false, null);
                     try {
                         get();
-                        status.setText("Saved: " + out.getAbsolutePath());
+                        status.setText("Saved (" + mode.name + "): " + out.getAbsolutePath());
                     } catch (Exception ex) {
                         status.setText("Encode failed: " + rootMessage(ex));
                     }
@@ -110,6 +131,7 @@ public class SSTVFrame extends JFrame {
 
         private void setBusy(boolean busy, String message) {
             chooseImageBtn.setEnabled(!busy);
+            modeBox.setEnabled(!busy);
             encodeBtn.setEnabled(!busy && sourceImage != null);
             progress.setIndeterminate(busy);
             if (message != null) status.setText(message);
@@ -119,10 +141,11 @@ public class SSTVFrame extends JFrame {
     // ============================= DECODE =============================
 
     private static class DecodePanel extends JPanel {
-        private final ImageView preview = new ImageView(MartinM1.WIDTH, MartinM1.HEIGHT);
+        private final ImageView preview = new ImageView();
         private final JLabel status = new JLabel("Choose a WAV file to decode.");
         private final JButton chooseWavBtn = new JButton("Choose WAV…");
         private final JButton saveImageBtn = new JButton("Save Image…");
+        private final JComboBox<String> modeBox = new JComboBox<>();
         private final JProgressBar progress = new JProgressBar();
 
         private BufferedImage decodedImage;
@@ -133,8 +156,13 @@ public class SSTVFrame extends JFrame {
 
             add(preview, BorderLayout.CENTER);
 
+            modeBox.addItem("Auto-detect (from VIS header)");
+            for (SSTVMode m : SSTVModes.ALL) modeBox.addItem(m.name);
+
             JPanel top = new JPanel(new FlowLayout(FlowLayout.LEFT));
             top.add(chooseWavBtn);
+            top.add(new JLabel("Mode:"));
+            top.add(modeBox);
             top.add(saveImageBtn);
             add(top, BorderLayout.NORTH);
 
@@ -149,18 +177,24 @@ public class SSTVFrame extends JFrame {
             saveImageBtn.addActionListener(e -> saveImage());
         }
 
+        private SSTVMode forcedMode() {
+            int idx = modeBox.getSelectedIndex();
+            return idx <= 0 ? null : SSTVModes.ALL.get(idx - 1);
+        }
+
         private void chooseAndDecode() {
             JFileChooser fc = new JFileChooser();
             fc.setFileFilter(new javax.swing.filechooser.FileNameExtensionFilter("WAV audio", "wav"));
             if (fc.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) return;
             File in = fc.getSelectedFile();
+            SSTVMode forced = forcedMode();
 
             setBusy(true, "Decoding…");
             new SwingWorker<SSTVDecoder.Result, Void>() {
                 @Override
                 protected SSTVDecoder.Result doInBackground() throws Exception {
                     WavFile.WavData data = WavFile.read(in);
-                    return SSTVDecoder.decode(data.samples, data.sampleRate);
+                    return SSTVDecoder.decode(data.samples, data.sampleRate, forced);
                 }
 
                 @Override
@@ -169,17 +203,16 @@ public class SSTVFrame extends JFrame {
                     try {
                         SSTVDecoder.Result result = get();
                         decodedImage = result.image;
-                        preview.setImage(decodedImage);
+                        preview.setImage(decodedImage, result.mode.width, result.mode.height);
                         saveImageBtn.setEnabled(true);
-                        if (result.visCode == MartinM1.VIS_CODE) {
-                            status.setText("Decoded. VIS header confirmed Martin M1.");
-                        } else if (result.visCode >= 0) {
-                            status.setText("Decoded, but VIS header reported mode " + result.visCode
-                                    + " (expected " + MartinM1.VIS_CODE + " for Martin M1) — "
-                                    + "decoded as Martin M1 anyway; result may be wrong.");
+                        if (result.visConfirmed) {
+                            status.setText("Decoded as " + result.mode.name + " (confirmed by VIS header).");
+                        } else if (forced != null) {
+                            status.setText("Decoded as " + result.mode.name + " (forced) — "
+                                    + "VIS header did not confirm this mode; result may be wrong.");
                         } else {
-                            status.setText("Decoded (no VIS header found — assumed audio starts at "
-                                    + "the first sync pulse and decoded as Martin M1).");
+                            status.setText("Decoded as " + result.mode.name + " (default — no VIS header "
+                                    + "found or its code wasn't recognized; try forcing a mode above if this looks wrong).");
                         }
                     } catch (Exception ex) {
                         status.setText("Decode failed: " + rootMessage(ex));
@@ -202,6 +235,7 @@ public class SSTVFrame extends JFrame {
 
         private void setBusy(boolean busy, String message) {
             chooseWavBtn.setEnabled(!busy);
+            modeBox.setEnabled(!busy);
             progress.setIndeterminate(busy);
             if (message != null) status.setText(message);
         }
@@ -215,21 +249,25 @@ public class SSTVFrame extends JFrame {
         return cur.getMessage() != null ? cur.getMessage() : cur.toString();
     }
 
-    /** Simple fixed-aspect image preview panel. */
+    /** Simple fixed-aspect image preview panel; aspect ratio can change (per selected mode). */
     private static class ImageView extends JPanel {
-        private final int aspectW, aspectH;
+        private int aspectW = 320, aspectH = 256;
         private BufferedImage image;
 
-        ImageView(int aspectW, int aspectH) {
-            this.aspectW = aspectW;
-            this.aspectH = aspectH;
+        ImageView() {
             setBackground(Color.DARK_GRAY);
             setBorder(BorderFactory.createLoweredBevelBorder());
         }
 
-        void setImage(BufferedImage img) {
-            this.image = img;
+        void setAspect(int w, int h) {
+            this.aspectW = w;
+            this.aspectH = h;
             repaint();
+        }
+
+        void setImage(BufferedImage img, int w, int h) {
+            this.image = img;
+            setAspect(w, h);
         }
 
         @Override

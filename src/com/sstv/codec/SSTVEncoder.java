@@ -7,50 +7,59 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Encodes a {@link BufferedImage} into a Martin M1 SSTV audio waveform.
- * <p>
- * The image is scaled to 320x256 and transmitted as a VIS header (identifying
- * the mode to a receiver) followed by 256 scan lines, each made of a sync
- * pulse and three color-channel scans (Green, Blue, Red) separated by short
- * separator pulses. Every pixel becomes a short tone whose frequency encodes
- * its brightness (1500 Hz = black, 2300 Hz = white).
+ * Encodes a {@link BufferedImage} into an SSTV audio waveform for a given
+ * {@link SSTVMode}. Scales the image to the mode's resolution, emits a VIS
+ * header identifying the mode, then walks each row's segment template
+ * (sync/tone/channel, in whatever order that mode uses) to build the signal.
  */
 public final class SSTVEncoder {
 
     private SSTVEncoder() {}
 
-    public static double[] encode(BufferedImage source) {
-        BufferedImage img = scaleTo(source, MartinM1.WIDTH, MartinM1.HEIGHT);
-        ToneBuilder tone = new ToneBuilder(MartinM1.SAMPLE_RATE);
+    public static double[] encode(BufferedImage source, SSTVMode mode) {
+        BufferedImage img = scaleTo(source, mode.width, mode.height);
+        ToneBuilder tone = new ToneBuilder(SSTVConstants.SAMPLE_RATE);
 
         // --- VIS header: leader / break / leader / start bit / 7 data bits + parity / stop bit ---
-        tone.add(1900, 300);
-        tone.add(1200, 10);
-        tone.add(1900, 300);
-        tone.add(1200, 30); // start bit
-        for (boolean bit : VISCode.encode(MartinM1.VIS_CODE)) {
-            tone.add(bit ? 1100 : 1300, 30); // 1 = 1100Hz, 0 = 1300Hz
+        tone.add(SSTVConstants.VIS_LEADER_FREQ, SSTVConstants.VIS_LEADER_MS);
+        tone.add(SSTVConstants.VIS_BREAK_FREQ, SSTVConstants.VIS_BREAK_MS);
+        tone.add(SSTVConstants.VIS_LEADER_FREQ, SSTVConstants.VIS_LEADER_MS);
+        tone.add(SSTVConstants.VIS_BREAK_FREQ, SSTVConstants.VIS_BIT_MS); // start bit
+        for (boolean bit : VISCode.encode(mode.visCode)) {
+            tone.add(bit ? SSTVConstants.VIS_BIT_ONE_FREQ : SSTVConstants.VIS_BIT_ZERO_FREQ, SSTVConstants.VIS_BIT_MS);
         }
-        tone.add(1200, 30); // stop bit
+        tone.add(SSTVConstants.VIS_BREAK_FREQ, SSTVConstants.VIS_BIT_MS); // stop bit
 
-        // --- Scan lines ---
-        for (int y = 0; y < MartinM1.HEIGHT; y++) {
-            tone.add(MartinM1.SYNC_FREQ, MartinM1.SYNC_MS);
-            tone.add(MartinM1.PORCH_FREQ, MartinM1.PORCH_MS);
+        // Some modes (Scottie) send an extra standalone sync pulse here so a
+        // receiver can lock before any row data starts.
+        if (mode.leadingSyncMs > 0) {
+            tone.add(SSTVConstants.SYNC_FREQ, mode.leadingSyncMs);
+        }
 
-            addChannel(tone, img, y, 1); // Green
-            tone.add(MartinM1.SEP_FREQ, MartinM1.SEP_MS);
-            addChannel(tone, img, y, 2); // Blue
-            tone.add(MartinM1.SEP_FREQ, MartinM1.SEP_MS);
-            addChannel(tone, img, y, 0); // Red
-            tone.add(MartinM1.SEP_FREQ, MartinM1.SEP_MS);
+        // --- Rows ---
+        for (int y = 0; y < mode.height; y++) {
+            for (Segment seg : mode.rowTemplate) {
+                switch (seg.kind) {
+                    case SYNC:
+                        tone.add(SSTVConstants.SYNC_FREQ, seg.ms);
+                        break;
+                    case TONE:
+                        tone.add(seg.freq, seg.ms);
+                        break;
+                    case CHANNEL:
+                        addChannel(tone, img, y, seg.channel, seg.ms, mode.width);
+                        break;
+                }
+            }
         }
 
         return tone.build();
     }
 
-    private static void addChannel(ToneBuilder tone, BufferedImage img, int y, int channelIndex) {
-        for (int x = 0; x < MartinM1.WIDTH; x++) {
+    private static void addChannel(ToneBuilder tone, BufferedImage img, int y, int channelIndex,
+                                    double scanMs, int width) {
+        double pixelMs = scanMs / width;
+        for (int x = 0; x < width; x++) {
             int rgb = img.getRGB(x, y);
             int value;
             switch (channelIndex) {
@@ -58,7 +67,7 @@ public final class SSTVEncoder {
                 case 1: value = (rgb >> 8) & 0xFF; break;  // G
                 default: value = rgb & 0xFF; break;        // B
             }
-            tone.add(MartinM1.freqForValue(value), MartinM1.PIXEL_MS);
+            tone.add(SSTVConstants.freqForValue(value), pixelMs);
         }
     }
 

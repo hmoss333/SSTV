@@ -3,7 +3,7 @@ package com.sstv.codec;
 import java.awt.image.BufferedImage;
 
 /**
- * Decodes a Martin M1 SSTV audio waveform back into an image.
+ * Decodes an SSTV audio waveform back into an image.
  * <p>
  * Approach (standard technique for analog FM-style signals like SSTV):
  * <ol>
@@ -16,9 +16,14 @@ import java.awt.image.BufferedImage;
  *       filter settles cleanly within one window.</li>
  *   <li>Estimate instantaneous frequency sample-to-sample via the
  *       delay-and-conjugate method (a standard digital FM discriminator).</li>
- *   <li>Locate the VIS header (if present) to confirm the mode, then walk
- *       line by line, re-locating each line's sync pulse within a small
- *       search window to correct for any timing drift.</li>
+ *   <li>Decode the VIS header (if present) to auto-detect the mode, then walk
+ *       row by row using that mode's segment template. Every mode's sync
+ *       pulse sits somewhere in the row template (start, for Martin; between
+ *       the Blue and Red scans, for Scottie) -- the decoder locates it at its
+ *       expected offset within each row, then reads every segment (channel
+ *       scans included) relative to that corrected anchor, which corrects for
+ *       any timing drift once per row regardless of where in the row the
+ *       sync happens to sit.</li>
  * </ol>
  * This works well on clean signals (anything encoded by {@link SSTVEncoder},
  * or a clean recording). It has no special noise handling -- see the README
@@ -30,64 +35,110 @@ public final class SSTVDecoder {
 
     public static final class Result {
         public final BufferedImage image;
-        /** Decoded VIS mode code, or -1 if no VIS header could be confidently located. */
-        public final int visCode;
+        public final SSTVMode mode;
+        /** True if a VIS header was found and decoded to a recognized mode. */
+        public final boolean visConfirmed;
 
-        Result(BufferedImage image, int visCode) {
+        Result(BufferedImage image, SSTVMode mode, boolean visConfirmed) {
             this.image = image;
-            this.visCode = visCode;
+            this.mode = mode;
+            this.visConfirmed = visConfirmed;
         }
     }
 
-    /** Width (in samples) of the moving-average lowpass used by the FM discriminator. */
-    private static final int FILTER_WINDOW = 12;
-
+    /** Decodes using VIS-header auto-detection, falling back to {@link SSTVModes#DEFAULT}. */
     public static Result decode(double[] samples, double sampleRate) {
+        return decode(samples, sampleRate, null);
+    }
+
+    /**
+     * Decodes as {@code forcedMode} if given (ignoring the VIS header for mode
+     * selection, though it's still checked to report {@code visConfirmed}); if
+     * {@code forcedMode} is null, the mode is auto-detected from the VIS header,
+     * falling back to {@link SSTVModes#DEFAULT} if none is found.
+     */
+    public static Result decode(double[] samples, double sampleRate, SSTVMode forcedMode) {
         Discriminator disc = new Discriminator(samples, sampleRate, 1900.0, FILTER_WINDOW);
         double[] freq = disc.freq;
 
         int visStart = findLeaderStart(freq, sampleRate);
-        int visCode = -1;
-        int cursor;
+        int visCodeDecoded = -1;
+        int headerEnd = 0;
         if (visStart >= 0) {
             long[] header = decodeVisHeader(freq, sampleRate, visStart);
-            visCode = (int) header[0];
-            cursor = (int) header[1];
-        } else {
-            // No clean leader tone found (e.g. a clip with the header trimmed off) --
-            // just assume the audio starts right at the first sync pulse.
-            cursor = 0;
+            visCodeDecoded = (int) header[0];
+            headerEnd = (int) header[1];
         }
 
-        BufferedImage img = new BufferedImage(MartinM1.WIDTH, MartinM1.HEIGHT, BufferedImage.TYPE_INT_RGB);
-        int lineSamplesNominal = samplesFor(MartinM1.totalLineMs(), sampleRate);
-        int searchWindow = samplesFor(15.0, sampleRate); // +/- 15ms drift tolerance per line
+        SSTVMode detected = visCodeDecoded >= 0 ? SSTVModes.byVisCode(visCodeDecoded) : null;
+        SSTVMode mode = forcedMode != null ? forcedMode : (detected != null ? detected : SSTVModes.DEFAULT);
+        boolean visConfirmed = detected != null && detected == mode;
 
-        int pos = cursor;
-        for (int y = 0; y < MartinM1.HEIGHT; y++) {
-            int syncPos = findSyncPulse(freq, sampleRate, pos, searchWindow);
-            if (syncPos < 0) syncPos = pos; // couldn't confirm a pulse; keep marching forward
-
-            int p = syncPos + samplesFor(MartinM1.SYNC_MS, sampleRate) + samplesFor(MartinM1.PORCH_MS, sampleRate);
-
-            int[] green = readChannel(freq, sampleRate, p, disc.filterDelay);
-            p += samplesFor(MartinM1.SCAN_MS, sampleRate) + samplesFor(MartinM1.SEP_MS, sampleRate);
-
-            int[] blue = readChannel(freq, sampleRate, p, disc.filterDelay);
-            p += samplesFor(MartinM1.SCAN_MS, sampleRate) + samplesFor(MartinM1.SEP_MS, sampleRate);
-
-            int[] red = readChannel(freq, sampleRate, p, disc.filterDelay);
-            p += samplesFor(MartinM1.SCAN_MS, sampleRate) + samplesFor(MartinM1.SEP_MS, sampleRate);
-
-            for (int x = 0; x < MartinM1.WIDTH; x++) {
-                int rgb = (red[x] << 16) | (green[x] << 8) | blue[x];
-                img.setRGB(x, y, rgb);
+        int pos = headerEnd;
+        if (mode.leadingSyncMs > 0) {
+            int leadWindow = samplesFor(30, sampleRate);
+            int leadPos = findPulse(freq, sampleRate, pos, leadWindow, SSTVConstants.SYNC_FREQ,
+                    Math.max(4, samplesFor(mode.leadingSyncMs, sampleRate) / 3));
+            if (leadPos >= 0) {
+                pos = leadPos + samplesFor(mode.leadingSyncMs, sampleRate);
             }
-
-            pos = syncPos + lineSamplesNominal;
+            // If not found, just proceed from headerEnd -- the per-row loop below will
+            // still try to find each row's own sync pulse.
         }
 
-        return new Result(img, visCode);
+        BufferedImage img = new BufferedImage(mode.width, mode.height, BufferedImage.TYPE_INT_RGB);
+        int rowSamplesNominal = samplesFor(mode.rowDurationMs(), sampleRate);
+        int syncOffsetSamples = samplesFor(mode.syncOffsetMs(), sampleRate);
+        int syncProbeLen = Math.max(4, samplesFor(mode.syncMs(), sampleRate) / 3);
+        int searchWindow = samplesFor(15.0, sampleRate); // +/- 15ms drift tolerance per row
+
+        int expectedSyncPos = pos + syncOffsetSamples;
+        for (int y = 0; y < mode.height; y++) {
+            int syncPos = findPulse(freq, sampleRate, expectedSyncPos, searchWindow, SSTVConstants.SYNC_FREQ, syncProbeLen);
+            int rowStart = (syncPos >= 0 ? syncPos : expectedSyncPos) - syncOffsetSamples;
+
+            decodeRow(freq, sampleRate, mode, rowStart, disc.filterDelay, img, y);
+
+            expectedSyncPos = rowStart + rowSamplesNominal + syncOffsetSamples;
+        }
+
+        return new Result(img, mode, visConfirmed);
+    }
+
+    /**
+     * Width (in samples) of the moving-average lowpass used by the FM discriminator.
+     * <p>
+     * This is deliberately a single fixed value shared by every mode, not scaled to
+     * each mode's samples-per-pixel. A moving-average (boxcar) filter only rejects
+     * the discriminator's 2*fc (~3800 Hz) image term at specific window lengths --
+     * roughly {@code sampleRate/3800} -- regardless of pixel width; empirically,
+     * window sizes tuned down to match a faster mode's shorter pixel (e.g. Martin
+     * M2 or Scottie S2, at roughly half Martin M1's samples/pixel) land far from
+     * that null and let the ripple through, corrupting the signal far worse than
+     * the extra inter-pixel smearing a "too-wide" fixed window causes. 12 was found
+     * by sweeping window sizes against all four modes together (see README).
+     */
+    private static final int FILTER_WINDOW = 12;
+
+    private static void decodeRow(double[] freq, double sampleRate, SSTVMode mode, int rowStart,
+                                   double filterDelay, BufferedImage img, int y) {
+        int[] r = null, g = null, b = null;
+        int p = rowStart;
+        for (Segment seg : mode.rowTemplate) {
+            if (seg.kind == Segment.Kind.CHANNEL) {
+                int[] values = readChannel(freq, sampleRate, p, filterDelay, mode.width, seg.ms);
+                if (seg.channel == 0) r = values;
+                else if (seg.channel == 1) g = values;
+                else b = values;
+            }
+            p += samplesFor(seg.ms, sampleRate);
+        }
+        for (int x = 0; x < mode.width; x++) {
+            int rv = r != null ? r[x] : 0;
+            int gv = g != null ? g[x] : 0;
+            int bv = b != null ? b[x] : 0;
+            img.setRGB(x, y, (rv << 16) | (gv << 8) | bv);
+        }
     }
 
     private static int samplesFor(double ms, double sampleRate) {
@@ -99,10 +150,11 @@ public final class SSTVDecoder {
      * off each edge to avoid the transition between neighboring pixels, and shifting
      * the window forward by the filter's group delay to stay time-aligned.
      */
-    private static int[] readChannel(double[] freq, double sampleRate, int start, double filterDelay) {
-        int[] values = new int[MartinM1.WIDTH];
-        double pixelSamplesD = MartinM1.PIXEL_MS / 1000.0 * sampleRate;
-        for (int x = 0; x < MartinM1.WIDTH; x++) {
+    private static int[] readChannel(double[] freq, double sampleRate, int start, double filterDelay,
+                                      int width, double scanMs) {
+        int[] values = new int[width];
+        double pixelSamplesD = (scanMs / width) / 1000.0 * sampleRate;
+        for (int x = 0; x < width; x++) {
             double a = start + x * pixelSamplesD + filterDelay;
             double b = start + (x + 1) * pixelSamplesD + filterDelay;
             int lo0 = (int) Math.round(a);
@@ -120,16 +172,15 @@ public final class SSTVDecoder {
                 sum += freq[i];
                 count++;
             }
-            double avg = count > 0 ? sum / count : MartinM1.BLACK_FREQ;
-            values[x] = MartinM1.valueForFreq(avg);
+            double avg = count > 0 ? sum / count : SSTVConstants.BLACK_FREQ;
+            values[x] = SSTVConstants.valueForFreq(avg);
         }
         return values;
     }
 
-    /** Looks for a sustained ~1200 Hz pulse within [center-window, center+window]. */
-    private static int findSyncPulse(double[] freq, double sampleRate, int center, int window) {
-        int syncLen = samplesFor(MartinM1.SYNC_MS, sampleRate);
-        int probe = Math.max(4, syncLen / 3);
+    /** Looks for a sustained pulse at {@code targetFreq} within [center-window, center+window]. */
+    private static int findPulse(double[] freq, double sampleRate, int center, int window,
+                                  double targetFreq, int probe) {
         int lo = Math.max(0, center - window);
         int hi = Math.min(freq.length - probe, center + window);
         int best = -1;
@@ -138,7 +189,7 @@ public final class SSTVDecoder {
             double sum = 0;
             for (int k = 0; k < probe; k++) sum += freq[i + k];
             double avg = sum / probe;
-            double score = Math.abs(avg - MartinM1.SYNC_FREQ);
+            double score = Math.abs(avg - targetFreq);
             if (score < bestScore) {
                 bestScore = score;
                 best = i;
@@ -157,7 +208,7 @@ public final class SSTVDecoder {
             double sum = 0;
             for (int k = 0; k < winLen; k++) sum += freq[i + k];
             double avg = sum / winLen;
-            if (Math.abs(avg - 1900.0) < 60) {
+            if (Math.abs(avg - SSTVConstants.VIS_LEADER_FREQ) < 60) {
                 consecutive += step;
                 if (consecutive >= needRun) return Math.max(0, i - consecutive + step);
             } else {
@@ -169,13 +220,13 @@ public final class SSTVDecoder {
 
     /** @return {@code [decodedVisCode (or -1), sampleIndexJustAfterHeader]} */
     private static long[] decodeVisHeader(double[] freq, double sampleRate, int leaderStart) {
-        int p = leaderStart + samplesFor(300, sampleRate); // leader 1
-        p += samplesFor(10, sampleRate);                   // break
-        p += samplesFor(300, sampleRate);                  // leader 2
-        p += samplesFor(30, sampleRate);                   // start bit
+        int p = leaderStart + samplesFor(SSTVConstants.VIS_LEADER_MS, sampleRate); // leader 1
+        p += samplesFor(SSTVConstants.VIS_BREAK_MS, sampleRate);                   // break
+        p += samplesFor(SSTVConstants.VIS_LEADER_MS, sampleRate);                  // leader 2
+        p += samplesFor(SSTVConstants.VIS_BIT_MS, sampleRate);                     // start bit
 
         boolean[] bits = new boolean[8];
-        int bitLen = samplesFor(30, sampleRate);
+        int bitLen = samplesFor(SSTVConstants.VIS_BIT_MS, sampleRate);
         for (int i = 0; i < 8; i++) {
             int a = p + i * bitLen;
             int b = Math.min(freq.length, a + bitLen);
@@ -185,11 +236,11 @@ public final class SSTVDecoder {
                 sum += freq[k];
                 count++;
             }
-            double avg = count > 0 ? sum / count : 1300;
+            double avg = count > 0 ? sum / count : SSTVConstants.VIS_BIT_ZERO_FREQ;
             bits[i] = avg < 1200; // closer to 1100Hz (=1) than 1300Hz (=0)
         }
         int code = VISCode.decode(bits);
-        int end = p + 8 * bitLen + samplesFor(30, sampleRate); // + stop bit
+        int end = p + 8 * bitLen + samplesFor(SSTVConstants.VIS_BIT_MS, sampleRate); // + stop bit
         return new long[]{code, end};
     }
 

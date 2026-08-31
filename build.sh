@@ -29,9 +29,51 @@ jar cfe sstv.jar com.sstv.Main -C out .
 echo "Built sstv.jar"
 echo "  Run it with: java -jar sstv.jar"
 
+# Always produce a double-clickable launcher too, no jpackage required.
+# On macOS, a .command file opens in Finder like an app (Terminal runs it).
+# On Linux desktops, a chmod+x .sh with a matching .desktop file is the
+# equivalent, but most Linux users are comfortable with a shell script directly.
+cat > SSTV.command << 'LAUNCHER'
+#!/usr/bin/env bash
+cd "$(dirname "$0")"
+exec java -jar sstv.jar
+LAUNCHER
+chmod +x SSTV.command
+echo "Also wrote SSTV.command -- double-click it in Finder to run (macOS may ask you to"
+echo "right-click > Open the first time, since it isn't signed)."
+
 if [[ "${1:-}" == "package" ]]; then
     if ! command -v jpackage >/dev/null 2>&1; then
         echo "error: jpackage not found on PATH. It ships with JDK 16+; update your JDK to use 'package'." >&2
+        exit 1
+    fi
+    if ! jpackage --version >/dev/null 2>&1; then
+        cat >&2 << 'DIAG'
+error: jpackage exists on PATH but couldn't run.
+
+On macOS this is Apple's own Java launcher stub talking, not this script:
+/usr/bin/jpackage always exists, but it defers to `java_home` to find a real
+JDK 14+ behind it, and none was found. This usually means:
+  - only a JRE is installed (jpackage needs a full JDK), or
+  - the JDK is older than 14, or
+  - a Homebrew-installed JDK was never registered with java_home.
+
+To diagnose:
+  /usr/libexec/java_home -V          # lists every JDK macOS can see
+
+If a suitable JDK (14+) is listed but isn't the default, point at it directly:
+  export JAVA_HOME=$(/usr/libexec/java_home -v 21)   # match a version from the list above
+  ./build.sh package
+
+If nothing 14+ is listed, install one (e.g. https://adoptium.net, or
+`brew install openjdk@21` followed by:
+  sudo ln -sfn "$(brew --prefix openjdk@21)/libexec/openjdk.jdk" \
+      /Library/Java/JavaVirtualMachines/openjdk-21.jdk
+then re-run `/usr/libexec/java_home -V` to confirm it shows up).
+
+In the meantime, sstv.jar and SSTV.command above already work fine without
+jpackage -- you only need this step for a fully bundled, Java-free app.
+DIAG
         exit 1
     fi
 
