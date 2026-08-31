@@ -121,31 +121,3 @@ modes: at these sample/pixel ratios a pixel is comparable to or shorter
 than one carrier cycle, so instantaneous frequency can't be measured
 perfectly right at a transition. Real SSTV decoders show the same kind of
 edge softening.
-
-## What to extend first
-
-1. **Better anti-aliasing filter for M2/S2.** A properly designed FIR
-   (e.g. windowed-sinc with a stopband null placed independently of its
-   length, or a real Hilbert-transform-based analytic signal) could reject
-   the ~3800 Hz image term without needing a window comparable to or wider
-   than the pixel itself, closing most of the M2/S2 accuracy gap. This was
-   explored but not completed — see `CHANGES.md`.
-2. **Noise robustness.** The decoder assumes a clean signal. A real
-   off-air or microphone recording will have noise, so the sync/leader
-   search thresholds (currently fixed at `150`/`60`) will need to be
-   adaptive (e.g. relative to signal energy) rather than fixed, and the
-   sync search should score against a matched filter instead of a simple
-   average.
-3. **YCbCr modes (Robot 36, PD-family).** These modes use chroma
-   subsampling and a fundamentally different row layout (shared chroma
-   across two luma rows) rather than a simple per-row RGB scan, so they
-   don't fit the current `Segment`/`SSTVMode` model as-is without extending
-   it — deliberately not attempted here to avoid shipping an unverified,
-   likely-buggy implementation of a more complex format.
-4. **Live audio.** Right now both directions only work through WAV files.
-   Wiring `javax.sound.sampled.TargetDataLine`/`SourceDataLine` in would let
-   you decode from a live mic input (e.g. off a radio) or play the encoded
-   signal directly instead of round-tripping through a file.
-5. **A waterfall/spectrogram view** in the decode tab would make it much
-   easier to see what's going on when a real (noisy) signal doesn't decode
-   cleanly, and is what every real SSTV program uses for tuning.
